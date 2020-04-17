@@ -1,0 +1,142 @@
+---
+title: "brexit1"
+author: "James Bell"
+date: "4/17/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Brexit - quick analysis
+
+
+```{r brexit}
+library(tidyverse)
+options(digits = 3)
+library(dslabs)
+data(brexit_polls)
+
+#Final outcomes
+p <- 0.481    # official proportion voting "Remain"
+d <- 2*p-1    # official spread
+
+N=1500
+EN1 <- N*p   # p = 'Remain' choice; EN1 = total # voters choosing 'Remain'
+SE1 <- N*sqrt(p*(1-p)/N)
+ 
+X_hat <- p # Est. proportion choosing 'Remain'
+se_X_hat <- sqrt((X_hat*(1-X_hat)/N))
+
+d_hat <- 2*X_hat - 1 #Est of proportion spread between 'Remain' and 'Leave'
+se_d_hat <- 2*sqrt(X_hat*(1-X_hat)/N)
+
+
+# All polls (up to 6 mo before Brexit vote)
+brexit_polls <- brexit_polls %>%  #Polling data 6 mo before Brexit vote
+        mutate(x_hat = (spread + 1) / 2) #Generate est proportion 'Remain' for each poll
+               
+obs_spread_mean <- mean(brexit_polls$spread)
+obs_spread_sd <- (brexit_polls$spread)
+ 
+x_hat_mean <- mean(brexit_polls$x_hat)
+x_hat_sd <- sd(brexit_polls$x_hat)   
+
+
+# Illustration: predictive power & accuracy of single poll
+b1 <- brexit_polls[1,] #YouGov poll on day of Brexit vote
+
+poll1_ci_x_hat = b1$x_hat + c(-qnorm(.975), qnorm(.975))*sqrt((b1$x_hat*(1-b1$x_hat)/b1$samplesize))
+poll1_lower_ci_x_hat = poll1_ci_x_hat[1]
+poll1_upper_ci_x_hat = poll1_ci_x_hat[2]
+# NOTE: 95% CI for one individual poll predicts a winner (b/c interval does not cross 0.5), but does not contain true p value (.481), even though poll took place on day of the vote
+
+# Polls in final month before Brexit vote
+june_polls <- brexit_polls %>%
+  filter(enddate >= "2016-06-01")  # df of all polls ending in June 2016 (month of brexit vote)
+
+june_polls <- june_polls %>%
+  mutate(se_x_hat=sqrt((x_hat*(1-x_hat)/samplesize))) 
+
+june_polls <- june_polls %>%
+  mutate(lower=x_hat - qnorm(.975)*se_x_hat, upper=x_hat + qnorm(.975)*se_x_hat) %>% #Add variables for 95% CI upper & lower range of est proportion 'Remain'
+  mutate(lower_d = (2*x_hat - 1) - qnorm(.975)*2*se_x_hat, upper_d= (2*x_hat - 1) + qnorm(.975)*2*se_x_hat) #Add variables for 95% CI upper & lower range of est spread (d)
+
+june_polls_count <- nrow(june_polls)
+hit0 <- (june_polls$lower_d <= 0 & june_polls$upper_d >= 0)
+june_polls_pred_nopred <- mean(hit0) #Proportion of polls that don't make a prediction (i.e. spread CI covers zero)
+hitremain <- june_polls$lower_d > 0
+june_polls_pred_remain <- mean(hitremain) #Proportion of polls that predict 'Remain' (lower CI of spread > 0)
+hitd <- (june_polls$lower_d <= d & june_polls$upper_d >= d)
+june_polls_pred_trued <- mean(hitd) #Proportion of polls that include final spread within spread CI
+
+
+june_by_pollster <- june_polls %>% #Pollster comparison df
+  group_by(pollster) %>%
+  summarize(hitrate=(mean(lower_d <= d & upper_d >= d)), count=n()) %>% 
+  arrange(desc(hitrate))
+    #NOTE: summarize items must return a scalar...e.g. hitrate can house a mean() but not the logical vector supplied to it
+
+boxplot_poll_type_june <- june_polls %>%  #Boxplots of June Brexit polls by poll type (online v. telephone)
+  ggplot(aes(poll_type, spread)) + geom_boxplot()
+boxplot_poll_type_june
+
+polls_by_type <- june_polls %>%
+        group_by(poll_type) %>%
+        summarize(N = sum(samplesize),
+                  spread = sum(spread*samplesize)/N,
+                  p_hat = (spread + 1)/2)
+
+#Online poll CIs
+polls_by_type %>%
+  filter(poll_type == 'Online') %>%
+  summarize(lower_online=(2*p_hat -1) - qnorm(.975)*2*sqrt(p_hat*(1-p_hat)/N), upper_online=(2*p_hat -1) + qnorm(.975)*2*sqrt(p_hat*(1-p_hat)/N))
+
+# Calculation check:
+p_hat_online <- as.numeric(polls_by_type[1,4])
+d_hat_online <- 2*p_hat_online - 1
+N_online <- as.numeric(polls_by_type[1,2])
+se_online <- 2*sqrt(p_hat_online*(1-p_hat_online)/N_online)
+ci_online <- d_hat_online + c(-qnorm(.975), qnorm(.975))*se_online
+
+# Overall spread by poll type: Inconclusive
+spread_by_poll_type <- polls_by_type %>%
+  mutate(lower=(2*p_hat -1) - qnorm(.975)*2*sqrt(p_hat*(1-p_hat)/N), upper=(2*p_hat -1) + qnorm(.975)*2*sqrt(p_hat*(1-p_hat)/N), ci_delta= upper-lower)
+#NOTE: Neither set of combined polls makes a prediction about the outcome of the Brexit referendum (i.e. both CI ranges cover 0), and neither confidence interval covers the final value of d= −0.038.
+
+# Analysis of predictive accuracy by poll type: odds ratio & time series plots
+brexit_hit <- brexit_polls %>%
+  mutate(p_hat = (spread + 1)/2,
+         se_spread = 2*sqrt(p_hat*(1-p_hat)/samplesize),
+         spread_lower = spread - qnorm(.975)*se_spread,
+         spread_upper = spread + qnorm(.975)*se_spread,
+         hit = spread_lower < -0.038 & spread_upper > -0.038) %>%
+  select(poll_type, hit)
+
+# Contingency table of 'final spread capture' by poll type
+contingency = table(brexit_hit)
+contingency
+chisq_test <- chisq.test(contingency)
+chisq_test_p <- chisq_test['p.value']
+#NOTE: Online polls are more likely to cover the correct value of the spread, and the difference is statistically significant.
+
+#Odds of each poll type CI capturing the final spread
+odds_online <- contingency[1,2]/contingency[1,1]
+odds_tele <- contingency[2,2]/contingency[2,1]
+odds_ratio <- odds_online/odds_tele #Relative likelihood of online polls capturing final spread compared to phone polls
+
+
+#Plot vote spread over time up to Brexit vote
+ggplot(brexit_polls, aes(x=enddate, y=spread, color=poll_type)) + geom_smooth(method="loess", span=0.4) + geom_point() + geom_hline( yintercept = -.038, color='blue')
+
+# Plot vote proportions over time up to Brexit vote
+brexit_long <- brexit_polls %>%
+    gather(vote, proportion, "remain":"undecided") %>%
+    mutate(vote = factor(vote))
+
+ggplot(brexit_long, aes(x=enddate, y=proportion, color=vote)) + geom_smooth(method="loess", span=0.3) + geom_point() + geom_hline( yintercept = -.038, color='blue')
+
+```
+
+
